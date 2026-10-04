@@ -25,7 +25,11 @@
   （400 `INVALID_STRATUM`）与未知推演（404 `PROJECTION_NOT_FOUND`）的错误约定、
   路径选取规则（证据数最少、并列按证据编号序列字典序最小）均不变；**已关闭推演
   （merged/discarded）仍可查询其冻结视图**。
-- **定版（快照）**：保存当前修订号下全部关系结论的不可变快照；后续撤回不影响旧版结论。
+- **定版（快照）**：保存当前修订号下全部关系结论与当时生效断言副本的不可变快照；
+  历史定版关系查询（`GET /snapshots/{version}/relationship`）的关系结论、最优证据
+  路径与逐步证据明细 `path_detail` 全部按**封存时断言**返回（逐步 `status` 恒为
+  `active`），后续正式批次撤回、野外包勘误替换或推演并入撤回支撑证据均不改变旧版
+  明细；当前正式关系仍由 `GET /relationship` 显示现时状态，历史成果包内容保持冻结。
 - **专题成果包**：把某定版中的一组（≥2、不重复、已登记）地层封存为不可变、可转交
   复核包：只含按编号排序的无序两两关系，结论与最优路径同该定版查询，确定结论携带
   路径按序原始断言，途经未入选地层随证据保留但不扩展关系，未定不附路径；同一定版 +
@@ -292,7 +296,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/projections/{id}/periodization/arrangement` | 推演冻结视图（含已关闭）只读分期试排，返回结构同正式 |
 | POST | `/snapshots` | 定版：保存不可变关系快照 `{label?}` |
 | GET | `/snapshots` / `/snapshots/{version}` | 版本列表 / 版本详情 |
-| GET | `/snapshots/{version}/relationship?a=L1&b=L3` | 查询历史版本结论 |
+| GET | `/snapshots/{version}/relationship?a=L1&b=L3` | 查询历史版本结论（结论/路径/逐步明细均按封存时断言返回，后续撤回不改变旧版明细） |
 | POST | `/projections` | 创建推演（固定当前修订号、地层与生效断言） `{label?}` |
 | GET | `/projections` / `/projections/{id}` | 推演列表 / 推演详情（含净变更） |
 | POST | `/projections/{id}/batches` | 推演内提交批次（携带推演修订号，语义同正式批次） |
@@ -1219,6 +1223,71 @@ curl -X POST "$BASE/projections/1/merge"
 bash examples/projection_demo.sh
 ```
 
+## 历史定版关系查询（封存明细不混时态）
+
+`GET /snapshots/{version}/relationship?a=...&b=...` 返回定版封存时的关系结论。
+定版在创建时同时固化**全部关系结论 / 最优路径**（`snapshot_conclusions`）与**当时
+生效断言副本**（`snapshots.assertions`），两者均不可变：
+
+- **逐步明细按封存时断言返回**：`relation`、`evidence_path` 取自封存结论，
+  `path_detail[]` 按路径顺序从**该定版自己的封存断言副本**展开（证据编号、两端
+  地层、关系），不读取在线 `assertions` 表；封存副本中的断言在定版时均生效，
+  故每步 `status` 恒为 `active`；
+- **后续任何撤回都不改变旧版明细**：定版后的正式批次撤回、野外整包勘误替换
+  （撤回原包证据）、推演并入撤回路径上的支撑证据后，重查同一历史定版，结论、
+  路径与逐步明细与封存时逐项一致——不会出现“封存结论 / `evidence_path` 未变、
+  但 `path_detail[].status` 变成 `retracted`”的混时态响应；
+- **与同一定版成果包严格一致**：专题成果包的证据明细本就取自
+  `snapshots.assertions`（`status=active`），定版查询与包证据明细同源；
+- **现时状态仍看正式查询**：证据撤回后的当前关系（可能变为未定、路径为空、
+  在线断言台账显示 `retracted`）由 `GET /relationship` 与 `GET /assertions`
+  如实呈现；历史成果包内容同样保持冻结；
+- **只读**：查询在 `REPEATABLE READ READ ONLY` 只读快照事务内完成，不写入
+  断言、修订或任何其他状态；
+- **约定不变**：输入（路径 `version`、查询参数 `a`/`b`）与响应字段
+  （`relation` / `relation_label` / `evidence_path` / `path_detail` /
+  `version` / `snapshot_revision`）不变，路径优选仍为证据数最少、并列按证据编号
+  序列字典序最小；同一地层查询返回 `same_period` 与空路径，封存时未定的地层对
+  返回 `undetermined`、`evidence_path=null`、`path_detail=[]`；未知定版返回
+  404 `SNAPSHOT_NOT_FOUND`，未知地层返回 400 `INVALID_STRATUM`。
+
+例：修订 1 下定版 v1 时 `L1 早于 L3`，路径 `["E1", "E2"]`（E1：L1 同期 L2；
+E2：L2 早于 L3）。修订 2 撤回 E2 后：
+
+```bash
+# 历史定版：结论 / 路径 / 逐步明细全部是封存值，E2 仍为 active
+curl -s "$BASE/snapshots/1/relationship?a=L1&b=L3"
+```
+
+```json
+{
+  "stratum_a": "L1",
+  "stratum_b": "L3",
+  "relation": "earlier_than",
+  "relation_label": "早于",
+  "evidence_path": ["E1", "E2"],
+  "path_detail": [
+    {"evidence_id": "E1", "stratum_a": "L1", "stratum_b": "L2", "relation": "same_period", "status": "active"},
+    {"evidence_id": "E2", "stratum_a": "L2", "stratum_b": "L3", "relation": "earlier_than", "status": "active"}
+  ],
+  "version": 1,
+  "snapshot_revision": 1
+}
+```
+
+```bash
+# 当前正式关系：如实显示现时状态（撤回后已未定）
+curl -s "$BASE/relationship?a=L1&b=L3"
+# -> {"relation": "undetermined", "evidence_path": null, "path_detail": [], "revision": 2, ...}
+```
+
+完整端到端示例（登记 → 断言 → 定版 → 同版封存成果包 → 撤回支撑证据 →
+历史定版明细保持 active / 正式查询显示未定 / 包内容冻结 / 404 与 400 错误约定）：
+
+```bash
+bash examples/snapshot_relationship_demo.sh
+```
+
 ## 专题成果包（定版地层关系封存转交）
 
 考古人员可把**某个定版**中的一组地层关系封存为可转交复核的专题成果包。成果包是
@@ -1447,6 +1516,14 @@ bash examples/demo.sh
 
 ```bash
 bash examples/relationship_view_demo.sh
+```
+
+历史定版关系查询“封存明细不混时态”演示（定版后撤回支撑证据，历史定版结论 / 路径 /
+逐步明细仍按封存断言返回且 status 恒 active，与同版成果包明细一致；当前正式关系
+显示现时未定、成果包内容冻结；查询只读，未知定版 / 未知地层错误约定不变）：
+
+```bash
+bash examples/snapshot_relationship_demo.sh
 ```
 
 分期骨架视图演示（无断言各自成组、同一期等价组、平行断言合并、

@@ -19,12 +19,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="考古地层关系核验服务",
-    version="1.14.0",
+    version="1.15.0",
     description=(
         "登记遗址地层与带唯一证据编号的“同一期 / 早于”断言；"
         "同一期可传递，早于沿同一期与早于路径推导；"
         "批次携带修订号、按整批最终关系核验，矛盾整批拒绝；"
         "支持关系查询（含支撑证据路径）与不可变定版快照；"
+        "历史定版关系查询的结论、最优路径与逐步证据明细均按封存时断言返回"
+        "（path_detail 取自定版冻结断言副本、status 恒 active），"
+        "定版后撤回（正式批次 / 野外包勘误 / 推演并入）不改变旧版明细，"
+        "当前正式关系仍显示现时状态、历史成果包内容保持冻结；"
         "正式关系查询（GET /relationship）与推演关系查询"
         "（GET /projections/{id}/relationship）均在同一只读快照视图内完成，"
         "一次响应的修订号 / 推演状态、关系结论、最优证据路径与逐步证据明细不混版："
@@ -494,7 +498,16 @@ def get_snapshot(version: int):
 
 @app.get("/snapshots/{version}/relationship", tags=["snapshots"])
 def get_snapshot_relationship(version: int, a: str = Query(...), b: str = Query(...)):
-    """查询历史版本结论；后续撤回不影响旧版。"""
+    """查询历史版本结论；后续撤回不影响旧版结论与逐步证据明细。
+
+    关系结论与最优证据路径取自封存结论表，逐步证据明细按定版封存时断言副本
+    （snapshots.assertions）逐步返回，不读在线 assertions 表：定版后正式批次撤回、
+    野外包勘误替换或推演并入撤回支撑证据，原版结论 / evidence_path / path_detail
+    均保持封存口径（每步 status 恒为 active），与同一定版封存的专题成果包证据明细
+    一致；当前正式关系的现时状态仍由 GET /relationship 显示。查询在
+    REPEATABLE READ READ ONLY 只读快照事务内完成，不写断言或修订；输入、响应字段、
+    路径优选约定不变，未知定版 404 SNAPSHOT_NOT_FOUND、未知地层 400 INVALID_STRATUM。
+    """
     return service.query_snapshot_relationship(version, a, b)
 
 

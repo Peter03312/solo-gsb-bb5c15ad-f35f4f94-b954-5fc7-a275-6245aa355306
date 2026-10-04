@@ -67,7 +67,7 @@ curl -s -X POST "$BASE/batches" -H 'Content-Type: application/json' -d '{
 echo; echo "== 11. 撤回后查询 L1 与 L3（当前已变为未定） =="
 curl -s "$BASE/relationship?a=L1&b=L3" | pp
 
-echo; echo "== 12. 查询版本 1 快照中的 L1 与 L3（旧版结论不变，仍为早于） =="
+echo; echo "== 12. 查询版本 1 快照中的 L1 与 L3（旧版结论与逐步明细均为封存值：仍为早于，EV-002 在 path_detail 中仍为 active） =="
 curl -s "$BASE/snapshots/1/relationship?a=L1&b=L3" | pp
 
 echo; echo "== 13. 错误示例：撤回不存在的断言（HTTP 409） =="

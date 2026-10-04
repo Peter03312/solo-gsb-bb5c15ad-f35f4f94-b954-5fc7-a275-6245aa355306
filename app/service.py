@@ -60,6 +60,30 @@ def _path_details(cur, path: Optional[List[str]]) -> List[Dict[str, Any]]:
     ]
 
 
+def _snapshot_path_details(path: Optional[List[str]], frozen_assertions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把定版路径按**封存时断言**逐步展开（不读在线 assertions 表）。
+
+    封存副本中的断言在定版时均为生效断言，故逐步 status 恒为 active；定版后正式
+    批次撤回、野外包勘误替换或推演并入撤回该证据，都不改变历史定版明细，避免
+    “封存结论 / evidence_path 与 path_detail.status”混时态，并与同一定版封存的
+    专题成果包证据明细（同样取自 snapshots.assertions）严格一致。
+    """
+    if not path:
+        return []
+    rows = {a["evidence_id"]: a for a in frozen_assertions}
+    return [
+        {
+            "evidence_id": eid,
+            "stratum_a": rows[eid]["stratum_a"],
+            "stratum_b": rows[eid]["stratum_b"],
+            "relation": rows[eid]["relation"],
+            "status": "active",
+        }
+        for eid in path
+        if eid in rows
+    ]
+
+
 def _relation_payload(relation: str, path: Optional[List[str]], cur) -> Dict[str, Any]:
     return {
         "relation": relation,
@@ -261,14 +285,26 @@ def get_snapshot(version: int) -> Dict[str, Any]:
 
 
 def query_snapshot_relationship(version: int, a: str, b: str) -> Dict[str, Any]:
-    """查询历史版本结论。快照不可变，后续撤回不影响旧版结论。"""
+    """查询历史版本结论。快照不可变，后续撤回不影响旧版结论与逐步证据明细。
+
+    关系结论、最优证据路径取自封存表 snapshot_conclusions，逐步证据明细取自定版
+    自身的封存断言副本 snapshots.assertions（status 恒为封存时的 active）——不读
+    在线 assertions 表：定版后撤回支撑证据、野外包勘误替换或推演并入撤回，原版
+    结论与明细均保持封存口径，与同一定版封存的专题成果包证据明细一致。当前正式
+    关系的现时状态仍由 GET /relationship 体现。全程只读快照事务，不写断言或修订。
+    """
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT revision FROM snapshots WHERE version = %s", (version,))
+            cur.execute("SET TRANSACTION READ ONLY ISOLATION LEVEL REPEATABLE READ")
+            cur.execute(
+                "SELECT revision, assertions FROM snapshots WHERE version = %s",
+                (version,),
+            )
             row = cur.fetchone()
             if row is None:
                 raise ApiError(404, "SNAPSHOT_NOT_FOUND", f"版本不存在: {version}", {"version": version})
             snapshot_revision = row[0]
+            frozen_assertions = list(row[1])
             _ensure_strata(cur, a, b)
 
             if a == b:
@@ -285,7 +321,12 @@ def query_snapshot_relationship(version: int, a: str, b: str) -> Dict[str, Any]:
                 else:
                     relation, path = row[0], list(row[1])
 
-            payload = _relation_payload(relation, path, cur)
+            payload = {
+                "relation": relation,
+                "relation_label": RELATION_LABELS[relation],
+                "evidence_path": path,
+                "path_detail": _snapshot_path_details(path, frozen_assertions),
+            }
             payload.update(
                 {
                     "stratum_a": a,
