@@ -26,6 +26,11 @@
   路径选取规则（证据数最少、并列按证据编号序列字典序最小）均不变；**已关闭推演
   （merged/discarded）仍可查询其冻结视图**。
 - **定版（快照）**：保存当前修订号下全部关系结论的不可变快照；后续撤回不影响旧版结论。
+  历史定版关系查询（`GET /snapshots/{version}/relationship`）的结论、最优证据路径与
+  逐步证据明细 `path_detail` 均按**封存时**口径返回：明细取自定版冻结的断言副本
+  （`snapshots.assertions`，与同期封存的成果包证据明细同一来源），不读在线断言表，
+  因此后续正式批次、野外包勘误或推演并入撤回路径上的证据后，历史明细（含每步
+  `status`）保持封存时的 `active` 不变；当前正式关系查询继续显示现时状态。
 - **专题成果包**：把某定版中的一组（≥2、不重复、已登记）地层封存为不可变、可转交
   复核包：只含按编号排序的无序两两关系，结论与最优路径同该定版查询，确定结论携带
   路径按序原始断言，途经未入选地层随证据保留但不扩展关系，未定不附路径；同一定版 +
@@ -292,7 +297,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/projections/{id}/periodization/arrangement` | 推演冻结视图（含已关闭）只读分期试排，返回结构同正式 |
 | POST | `/snapshots` | 定版：保存不可变关系快照 `{label?}` |
 | GET | `/snapshots` / `/snapshots/{version}` | 版本列表 / 版本详情 |
-| GET | `/snapshots/{version}/relationship?a=L1&b=L3` | 查询历史版本结论 |
+| GET | `/snapshots/{version}/relationship?a=L1&b=L3` | 查询历史版本结论（结论 / 最优路径 / 逐步明细均按封存时冻结口径，与同一定版封存的成果包明细一致） |
 | POST | `/projections` | 创建推演（固定当前修订号、地层与生效断言） `{label?}` |
 | GET | `/projections` / `/projections/{id}` | 推演列表 / 推演详情（含净变更） |
 | POST | `/projections/{id}/batches` | 推演内提交批次（携带推演修订号，语义同正式批次） |
@@ -707,6 +712,67 @@ bash examples/field_package_corrections_demo.sh
 ```bash
 # 并发提交下的同视图行为演示（含多线程并发查询校验、推演冻结视图、错误约定）
 bash examples/relationship_view_demo.sh
+```
+
+### 历史定版关系查询：逐步明细按封存时断言返回（只读）
+
+`GET /snapshots/{version}/relationship?a=...&b=...` 返回某一定版（快照）中两地层的
+封存关系。定版之后若路径上的支撑证据被撤回——无论是**正式批次**
+（`POST /batches`）、**野外整包勘误**（`POST /field-packages/corrections`）还是
+**推演并入**（`POST /projections/{id}/merge`）——本查询的响应保持封存时口径：
+
+- 关系结论与最优证据路径 `evidence_path` 取自该定版的冻结结论（`snapshot_conclusions`）；
+- 逐步证据明细 `path_detail` 按**定版冻结的断言副本**（`snapshots.assertions`）
+  逐步展开，**不读在线断言表**：每步的 `status` 恒为封存时的 `active`，与同一
+  定版封存的成果包（`POST /packages`）证据明细**同一来源、逐步一致**（包内每步
+  仅多一个 `in_selection` 标记）；
+- 当前正式关系查询 `GET /relationship` 不受定版影响，继续显示现时状态
+  （撤回后的结论与在线证据状态）；
+- 输入（`version`、`a`、`b`）、响应字段、路径优选（证据数最少、并列按证据编号
+  序列字典序最小）与错误约定不变：定版不存在 404 `SNAPSHOT_NOT_FOUND`、地层未登记
+  400 `INVALID_STRATUM`；查询只读，不写断言或修订。
+
+```bash
+# 定版（修订 2 时：EV-001 L1~L2、EV-002 L2<L3、野外包证据 F:… L3<L4 均生效）
+curl -X POST "$BASE/snapshots" -H 'Content-Type: application/json' -d '{"label": "二期定版"}'
+# -> {"version": 1, "revision": 2, "conclusions": ...}
+
+# 定版后陆续撤回路径证据：正式批次撤回 EV-002、野外包勘误撤回原包证据、推演并入撤回 EV-001
+curl -X POST "$BASE/batches" -H 'Content-Type: application/json' -d '{
+  "expected_revision": 2,
+  "operations": [{"op": "retract", "evidence_id": "EV-002"}]}'
+
+# 历史定版查询：结论 / 路径 / 逐步明细仍是封存时口径（各步 status 恒为 active）
+curl "$BASE/snapshots/1/relationship?a=L1&b=L4"
+```
+
+```json
+{
+  "stratum_a": "L1",
+  "stratum_b": "L4",
+  "relation": "earlier_than",
+  "relation_label": "早于",
+  "evidence_path": ["EV-001", "EV-002", "F:VC0wNw:UC0wMQ:000000000001"],
+  "path_detail": [
+    {"evidence_id": "EV-001", "stratum_a": "L1", "stratum_b": "L2", "relation": "same_period", "status": "active"},
+    {"evidence_id": "EV-002", "stratum_a": "L2", "stratum_b": "L3", "relation": "earlier_than", "status": "active"},
+    {"evidence_id": "F:VC0wNw:UC0wMQ:000000000001", "stratum_a": "L3", "stratum_b": "L4", "relation": "earlier_than", "status": "active"}
+  ],
+  "version": 1,
+  "snapshot_revision": 2
+}
+```
+
+```bash
+# 对照：当前正式关系显示现时状态（三条证据均已撤回，L1 与 L4 已未定）
+curl "$BASE/relationship?a=L1&b=L4"
+# -> {"relation": "undetermined", "evidence_path": null, "path_detail": [], "revision": 5, ...}
+
+# 与同一定版封存的成果包证据明细逐步一致（包内每步仅多 in_selection 标记）
+curl "$BASE/packages/1"
+
+# 完整端到端演示（三类撤回来源后历史明细不变、成果包逐步比对、错误约定）
+bash examples/snapshot_frozen_detail_demo.sh
 ```
 
 ### 证据撤回承受力分析：`POST /resilience/retraction-analysis`（只读）
@@ -1567,6 +1633,7 @@ app/
 examples/
   demo.sh           # curl 端到端示例（批次/查询/冲突/撤回/定版）
   relationship_view_demo.sh # 两类关系查询同视图示例（并发提交不混版/推演冻结视图/已关闭可查/错误约定）
+  snapshot_frozen_detail_demo.sh # 历史定版查询冻结明细示例（三类撤回来源后明细不变/成果包逐步比对/错误约定）
   periodization_demo.sh # 分期骨架视图示例（等价组/平行合并/传递省略/过期拒绝/撤回重算）
   arrangement_demo.sh # 分期试排示例（最早/最晚界、锚点、三类不可行证据链、推演冻结视图）
   preflight_demo.sh # 提交前只读预检示例（最少撤回/预算不足/新断言自相矛盾/拒绝/保全联动：EVIDENCE_HELD 与建议排除受保全证据/只读校验）
@@ -1586,6 +1653,7 @@ tests/
   test_preflight_holds.py            # 预检与临时保全联动回归：EVIDENCE_HELD 同构拒绝、受保全证据排除、解除恢复（内存假连接，无需数据库）
   test_relationship_view_consistency.py # 两类关系查询同视图回归（内存假连接：注入并发提交，断言修订号/结论/路径明细不混版）
   test_relationship_view_consistency_e2e.py # 同上的真实 PostgreSQL 端到端验证（语句门闩确定性交错 + 多线程压力）
+  test_snapshot_relationship_frozen_detail.py # 历史定版查询冻结明细回归（内存假连接：撤回后明细保持封存口径/与成果包同源/正式查询仍现态）
   bench_relation_diffs.py            # 大量无关地层 + 局部变更性能基准（纯函数）
 Dockerfile
 docker-compose.yml

@@ -494,7 +494,16 @@ def get_snapshot(version: int):
 
 @app.get("/snapshots/{version}/relationship", tags=["snapshots"])
 def get_snapshot_relationship(version: int, a: str = Query(...), b: str = Query(...)):
-    """查询历史版本结论；后续撤回不影响旧版。"""
+    """查询历史版本结论；后续撤回不影响旧版结论与逐步证据明细。
+
+    关系结论与最优证据路径取自该定版的冻结结论，逐步明细 path_detail 按定版
+    冻结的断言副本逐步展开（与同期封存的成果包证据明细同一来源、完全一致，
+    各步 status 恒为封存时的 active）：定版之后的正式批次、野外包勘误或推演
+    并入撤回路径上的证据，本查询的响应保持封存时口径不变；当前正式关系查询
+    GET /relationship 仍显示现时状态。定版不存在 404 SNAPSHOT_NOT_FOUND、
+    地层未登记 400 INVALID_STRATUM；路径优选规则与查询字段不变；只读，不写
+    断言或修订。
+    """
     return service.query_snapshot_relationship(version, a, b)
 
 
